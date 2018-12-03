@@ -12,6 +12,8 @@ def main(epochs, num_samples, seed, learning_rate, h_sizes, stop_flag):
 	mus_W, rhos_W, mus_b, rhos_b = init_distributions(layer_sizes)
 	
 	prev_loss = 0
+	epochs_list = []
+	losses = []
 	for e in range(epochs):
 		print '-------------------------'
 		print 'Epoch', e+1
@@ -39,16 +41,31 @@ def main(epochs, num_samples, seed, learning_rate, h_sizes, stop_flag):
 				rhos_b[i] = rhos_b[i] - lr*g_rhos_b[i]
 			
 		curr_loss = total_loss/num_samples
+		epochs_list.append(e)
+		losses.append(curr_loss)
 		print 'Loss:', curr_loss
 		if stop_flag and (abs(curr_loss-prev_loss) <= learning_rate):
 			break
 		prev_loss = curr_loss
 
+	epochs = np.array(epochs_list)
+	losses = np.array(losses)
+	plt.plot(epochs, losses, 'tab:orange', label='Loss')
+	plt.xlabel('Epochs')
+	plt.ylabel('Loss')
+	plt.title("Loss vs. Epochs")
+	plt.legend(loc='best', fancybox=True, shadow=True)
+	plt.show()
+
 	W, b, _,_ = get_params(mus_W, rhos_W, mus_b, rhos_b, eps_W, eps_b)
 	x_range = np.arange(-0.2,0.6,0.01)
 	y_range = np.array([forward_pass(x, W, b)[0][0] for x in x_range])
-	plt.plot(x_set, y_set, 'kx')
-	plt.plot(x_range, y_range)
+	plt.plot(x_set, y_set, 'kx', label='Data samples')
+	plt.plot(x_range, y_range, 'r', label='Regression Fit')
+	plt.xlabel('x')
+	plt.ylabel('y')
+	plt.title("Fit over data")
+	plt.legend(loc='best', fancybox=True, shadow=True)
 	plt.show()
 
 if __name__ == '__main__':
