@@ -8,12 +8,27 @@ def relu(x):
 def relu_grad(x):
 	return (x > 0).reshape(1,-1)
 	
-def gen_samples(sample_count=250):
-	x = np.random.uniform(0,0.5,size=sample_count).reshape((-1,1)) # uniform sampling for x
-	eps = np.random.normal(0,0.02,sample_count).reshape((-1,1)) # normal sampling for eps
+def gen_samples_toy(sample_count=250):
+	std = 3
+	x = np.random.uniform(-4,4,size=sample_count).reshape((-1,1)) # uniform sampling for x
+	eps = np.random.normal(0,std**2,sample_count).reshape((-1,1)) # normal sampling for eps
+	y = x**3+eps
+
+	return (x,y), std # return a tuple of x's and y's
+
+def gen_samples_paper(sample_count=250):
+	std = np.sqrt(np.float64(0.02))
+	x = np.random.uniform(-4,4,size=sample_count).reshape((-1,1)) # uniform sampling for x
+	eps = np.random.normal(0,std**2,sample_count).reshape((-1,1)) # normal sampling for eps
 	y = x+(0.3*np.sin(2*np.pi*(x+eps)))+(0.3*np.sin(4*np.pi*(x+eps)))+eps
 
-	return (x,y) # return a tuple of x's and y's
+	return (x,y), std # return a tuple of x's and y's
+
+def gen_samples(sample_count=250, gen_paper_flag=False):
+	if gen_paper_flag:
+		return gen_samples_paper(sample_count)
+	else:
+		return gen_samples_toy(sample_count)
 
 def gen_layer_sizes(num_layers, input_size, output_size, h_sizes):
 #h_sizes must be a list, even if it will have a single element
@@ -33,7 +48,7 @@ def gen_layer_sizes(num_layers, input_size, output_size, h_sizes):
 	return layer_sizes
 
 def init_distributions(layer_sizes):
-# We will need a mean and a variance for each weight
+# We will need a mu and a rho for each weight
 	mus_W = []
 	rhos_W = []
 	mus_b = []
@@ -41,9 +56,9 @@ def init_distributions(layer_sizes):
 	
 	for W_shape, b_shape in layer_sizes:
 		mu_W  = np.random.normal(0, 0.01, W_shape)
-		rho_W = np.random.normal(0, 0.01, W_shape)
-		mu_b  = np.random.uniform(-0.01, 0.01, b_shape)
-		rho_b = np.random.uniform(-0.01, 0.01, b_shape)
+		rho_W = -5+np.random.uniform(-0.01, 0.01, W_shape)
+		mu_b  = np.random.normal(0, 0.01, b_shape)
+		rho_b = -5+np.random.uniform(-0.01, 0.01, b_shape)
 		mus_W.append(mu_W)
 		rhos_W.append(rho_W)
 		mus_b.append(mu_b)
@@ -72,19 +87,27 @@ def get_params(mus_W, rhos_W, mus_b, rhos_b, eps_W, eps_b):
 		b.append(mus_b[i]+np.multiply(sigmas_b[i],eps_b[i]))
 	return W, b, sigmas_W, sigmas_b #sigmas will later be used for posterior and gradient calculation 
 
-def forward_pass(x, W, b):
+def forward_pass(x, W, b, mus_W, mus_b, sigmas_W, sigmas_b, eps_W, eps_b):
 # Go through the network
 	z = []
 	a = []
 	# z and a will later be used for gradient calculation
 	curr_input = x
+	# Hidden layers
 	for i in range(len(W)-1):
-		linear_out = np.dot(curr_input,W[i])+b[i]
-		z.append(linear_out) 
-		curr_input = relu(linear_out)
+		mean_out = np.dot(curr_input, mus_W[i])+mus_b[i]
+		std_out = np.sqrt(np.dot(np.square(curr_input),np.square(sigmas_W[i]))+sigmas_b[i])
+		eps = np.random.normal(0,1,mean_out.shape)
+		lin_out = mean_out+np.multiply(std_out,eps)
+		z.append(lin_out) 
+		curr_input = relu(lin_out)
 		a.append(curr_input)
-	y_hat = np.dot(curr_input,W[-1])+b[-1]
-	return y_hat, z, a
+	# Output layers
+	mean_out = np.dot(curr_input, mus_W[-1])+mus_b[-1]
+	std_out = np.sqrt(np.dot(np.square(curr_input),np.square(sigmas_W[-1]))+sigmas_b[-1])
+	eps = np.random.normal(0,1,mean_out.shape)
+	y_hat = mean_out+np.multiply(std_out,eps)
+	return y_hat, z, a, mean_out, std_out
 
 def calc_log_likelihood(y_train, y_hat):
 # Calculate log P(D|w) as log gaussian with unit variance
@@ -96,23 +119,14 @@ def calc_log_likelihood(y_train, y_hat):
 # We will calculate this loss at each iteration as we see (x_train,y_train) pairs
 	return (0.5*np.square(y_train-y_hat))
 
-def tf_calc_log_likelihood(y_train, y_hat):
-	return (0.5*tf.square(y_train-y_hat))
-
-def calc_log_prior(W, b):
-# Calculate log P(W) as log standard normal
-# log P(W) = log(1/sqrt(2*pi))-log(exp(-W^2/2))
-# log P(W) = -0.5log(2*pi)-0.5(W^2)
-	w_sum  = np.array([np.sum(-0.5*np.square(w)) for w in W])
-	w_sum += np.array([np.sum(-0.5*np.square(bias)) for bias in b])
+def calc_log_prior(W, b, prior_std):
+# Calculate log P(W) as log gaussian with variance
+# log P(W) = log(1/(s*sqrt(2*pi)))-log(exp(-W^2/2s^2))
+# log P(W) = -0.5log(2*pi)-log(s)-0.5(W^2)/(s^2)
+	s = np.float64(prior_std)
+	w_sum  = np.array([np.sum(-np.log(s)-0.5*np.square(w)/np.square(s)) for w in W])
+	w_sum += np.array([np.sum(-np.log(s)-0.5*np.square(bias)/np.square(s)) for bias in b])
 	return np.sum(w_sum)
-
-def tf_calc_log_prior(w0, b0, w1, b1):
-	w_sum  = tf.reduce_sum(-0.5*tf.square(w0))
-	w_sum += tf.reduce_sum(-0.5*tf.square(b0))
-	w_sum += tf.reduce_sum(-0.5*tf.square(w1))
-	w_sum += tf.reduce_sum(-0.5*tf.square(b1))
-	return tf.reduce_sum(w_sum)
 
 def calc_log_var_posterior(W,b,sigmas_W,sigmas_b,eps_W,eps_b):
 # Calculate log q(W|theta) as log gaussian N(W|mu,sigma^2)
@@ -132,39 +146,26 @@ def calc_log_var_posterior(W,b,sigmas_W,sigmas_b,eps_W,eps_b):
 		log_var_posterior += np.sum(-np.log(sigmas_b[i])-0.5*np.square(eps_b[i]))
 	return np.sum(log_var_posterior)
 
-def tf_calc_log_var_posterior(w0,b0,w1,b1,sigma_w0,sigma_b0,sigma_w1,sigma_b1,eps_w0,eps_b0,eps_w1,eps_b1):
-	log_var_posterior  = tf.reduce_sum(-tf.log(sigma_w0)-0.5*tf.square(eps_w0))
-	log_var_posterior += tf.reduce_sum(-tf.log(sigma_b0)-0.5*tf.square(eps_b0))
-	log_var_posterior += tf.reduce_sum(-tf.log(sigma_w1)-0.5*tf.square(eps_w1))
-	log_var_posterior += tf.reduce_sum(-tf.log(sigma_b1)-0.5*tf.square(eps_b1))
-	return tf.reduce_sum(log_var_posterior)
-
-def calc_kl(W, b, sigmas_W, sigmas_b, eps_W, eps_b, sample_count):
+def calc_kl(W, b, sigmas_W, sigmas_b, eps_W, eps_b, sample_count, prior_std):
 #KL divergence part of loss is simply log q(W|theta)-log p(W)
-	return (1./sample_count)*(calc_log_var_posterior(W, b, sigmas_W, sigmas_b, eps_W, eps_b)-calc_log_prior(W,b))
+	return (1./sample_count)*(calc_log_var_posterior(W, b, sigmas_W, sigmas_b, eps_W, eps_b)-calc_log_prior(W,b, prior_std))
 
-def tf_calc_kl(w0,b0,w1,b1,sigma_w0,sigma_b0,sigma_w1,sigma_b1,eps_w0,eps_b0,eps_w1,eps_b1,sample_count):
-#KL divergence part of loss is simply log q(W|theta)-log p(W)
-	return (1./sample_count)*(tf_calc_log_var_posterior(w0,b0,w1,b1,sigma_w0,sigma_b0,sigma_w1,sigma_b1,eps_w0,eps_b0,eps_w1,eps_b1)-tf_calc_log_prior(w0,b0,w1,b1))
-
-def variational_free_energy(W, b, sigmas_W, sigmas_b, eps_W, eps_b, y_train, y_hat, sample_count):
-	return np.sum(calc_kl(W, b, sigmas_W, sigmas_b, eps_W, eps_b, sample_count)+calc_log_likelihood(y_train,y_hat))
-
-def tf_variational_free_energy(w0,b0,w1,b1,sigma_w0,sigma_b0,sigma_w1,sigma_b1,eps_w0,eps_b0,eps_w1,eps_b1, y_train, y_hat, sample_count):
-	return tf.reduce_sum(tf_calc_kl(w0,b0,w1,b1,sigma_w0,sigma_b0,sigma_w1,sigma_b1,eps_w0,eps_b0,eps_w1,eps_b1,sample_count)
-		+tf_calc_log_likelihood(y_train,y_hat))
+def variational_free_energy(W, b, sigmas_W, sigmas_b, eps_W, eps_b, y_train, y_hat, sample_count, prior_std):
+	return np.sum(calc_kl(W, b, sigmas_W, sigmas_b, eps_W, eps_b, sample_count, prior_std)+calc_log_likelihood(y_train,y_hat))
 
 # Explanations of the gradient calculator functions below are provided in the report
 
-def rho_grad_kl(W, rhos, sigmas, eps, sample_count):
+def rho_grad_kl(W, rhos, sigmas, eps, sample_count, prior_std):
+	s = np.float64(prior_std)
 	g_rhos = []
 	for i, w in enumerate(W):
-		g_rho = (1./sample_count)*((-1./(sigmas[i])+np.multiply(w,eps[i])))*(1./(1+np.exp(-rhos[i])))
+		g_rho = (1./sample_count)*((-1./(sigmas[i])+np.multiply(w/s**2,eps[i])))*(1./(1+np.exp(-rhos[i])))
 		g_rhos.append(g_rho)
 	return g_rhos
 
-def mu_grad_kl(W, sample_count):
-	g_mus = [(1./sample_count)*w for w in W]
+def mu_grad_kl(W, sample_count, prior_std):
+	s = np.float64(prior_std)
+	g_mus = [(1./sample_count)*w/s**2 for w in W]
 	return g_mus
 
 def W_grad_log_likelihood_2layer(W, b, z, a, y_train, y_hat, x_train):
@@ -221,14 +222,14 @@ def mu_grad_log_likelihood(gW):
 	g_mus = list(map(lambda x: -x, gW))
 	return g_mus
 
-def mu_grad(gW, W, sample_count):
-	g_mus_kl = mu_grad_kl(W, sample_count)
+def mu_grad(gW, W, sample_count, prior_std):
+	g_mus_kl = mu_grad_kl(W, sample_count, prior_std)
 	g_mus_log_likelihood = mu_grad_log_likelihood(gW)
 	g_mus = [g_mus_kl[i] + g_mus_log_likelihood[i] for i in range(len(g_mus_kl))]
 	return g_mus
 
-def rho_grad(gW, W, rhos, sigmas, eps, sample_count):
-	g_rhos_kl = rho_grad_kl(W, rhos, sigmas, eps, sample_count)
+def rho_grad(gW, W, rhos, sigmas, eps, sample_count, prior_std):
+	g_rhos_kl = rho_grad_kl(W, rhos, sigmas, eps, sample_count, prior_std)
 	g_rhos_log_likelihood = rho_grad_log_likelihood(gW, rhos, eps)
 	g_rhos = [g_rhos_kl[i] + g_rhos_log_likelihood[i] for i in range(len(g_rhos_kl))]
 	return g_rhos
